@@ -156,12 +156,9 @@ minus = os.environ.get("MINUS") == "1"
 if minus:
     f, cc, cr, out = max(f-bf,0), max(cc-bcc,0), max(cr-bcr,0), max(out-bout,0)
 wf, wcc, wcr = (float(os.environ[k]) for k in ("W_FRESH","W_CC","W_CR"))
-eq = round(f*wf + cc*wcc + cr*wcr)
 real = f + cc  # the honest cost; cache_read is standing context @ ~0.1x
-src = "vs-noop-baseline" if minus else "fresh+cc"
-print(f"claude (default-model handoff-marginal): {real:,} real "
-      f"[{src}]  (= {f:,} fresh + {cc:,} cc; +{cr:,} cr standing@~0.1 "
-      f"≈ {eq:,} cost-eq; {out:,} out)")
+src = " [vs-baseline]" if minus else ""
+print(f"claude  {real:,} real{src}   {f:,} fresh + {cc:,} cc   {out:,} out   [+{cr:,} cr ctx]")
 PY
 )
       fi
@@ -191,17 +188,17 @@ if m and not (ci or co):
 if not (ci or co or ctot):
     m = re.search(r"tokens used\s*[\r\n]+\s*([\d,]+)", text, re.I)
     if m: ctot = int(m.group(1).replace(",", ""))
-body = (f"{ci:,}in/{co:,}out" if (ci or co)
+body = (f"{ci:,}in / {co:,}out" if (ci or co)
         else (f"{ctot:,} tok" if ctot else "(no token total in log)"))
-print(f"codex (separate cheap currency, not a ratio): {body}")
+print(f"codex   {body}")
 PY
 )
     fi
 
     echo "$claude_str"
-    [ -n "$SUBAGENT_SPAN" ] && echo "haiku orchestration span (cheap, informational): $SUBAGENT_SPAN"
+    [ -n "$SUBAGENT_SPAN" ] && echo "haiku   $SUBAGENT_SPAN  [orchestration only]"
     echo "$codex_str"
-    echo "outcome: ${OUTCOME:-(unspecified — pass --outcome accepted|N-fixups|reverted)}"
+    echo "result  ${OUTCOME:-(unspecified — pass --outcome accepted|N-fixups|reverted)}"
     ;;
 
   -h|--help|help|"")

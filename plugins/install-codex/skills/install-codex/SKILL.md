@@ -269,21 +269,21 @@ the manifest) to now — so the span is the **full marginal cost of choosing to
 delegate**: manifest + dispatch + review + report. It prints, e.g.:
 
 ```
-claude (default-model handoff-marginal): 2,790 real [fresh+cc]  (= 2,310 fresh + 480 cc; +91,572 cr standing@~0.1 ≈ 12k cost-eq; 1,240 out)
-codex (separate cheap currency, not a ratio): 27,284 tok
-outcome: accepted
+claude  2,790 real   2,310 fresh + 480 cc   1,240 out   [+91,572 cr ctx]
+codex   27,284 tok
+result  accepted
 ```
 
-Reading it correctly (this is the whole point of the audit fix):
+Reading it correctly:
 
-- **The headline is `… real [fresh+cc]`** — default-model tokens that exist
-  *only because* we delegated. That is the efficiency number. `cr` is standing
-  context billed ~0.1×; it is shown for transparency, **never** as the cost.
-- **`codex …` is a different, cheap currency.** No ratio, no arrow, no
-  "Claude vs Codex" comparison — by assumption Codex credits are the plentiful
-  resource; it's context, not a denominator.
-- **`outcome` is the effectiveness half.** A small token cost with
-  `outcome: reverted` or `3-fixups` is an *ineffective* handoff, not a cheap
+- **`real` (fresh+cc)** — default-model tokens that exist *only because* we
+  delegated. That is the efficiency number.
+- **`cr ctx`** — standing context billed ~0.1×; shown for transparency, never
+  counted as cost.
+- **`codex` is a separate currency.** Not a ratio — by assumption Codex credits
+  are the plentiful resource; it's context, not a denominator.
+- **`result` is the effectiveness half.** A small token cost with
+  `result: reverted` or `3-fixups` is an *ineffective* handoff, not a cheap
   one. Always pass a truthful `--outcome`.
 - We deliberately do **not** emit a counterfactual ("what Claude-only would
   have cost") — that can't be measured, only estimated, and the skill forbids
