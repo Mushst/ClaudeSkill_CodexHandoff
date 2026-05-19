@@ -1,6 +1,6 @@
 {
   "name": "install-codex",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Install the OpenAI Codex CLI + bubblewrap, and delegate low-complexity code-writing to Codex as a headless agent to save Claude tokens (Claude specs and reviews; a cheaper model types).",
   "author": {
     "name": "Mushst"

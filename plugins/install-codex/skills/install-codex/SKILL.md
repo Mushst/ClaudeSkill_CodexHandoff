@@ -107,7 +107,7 @@ codex exec \
   -c approval_policy="never" \
   -c model_reasoning_effort="high" \
   "$(cat /tmp/handoff-manifest.md)" \
-  < /dev/null
+  < /dev/null 2>&1 | tee /tmp/codex-handoff.log
 ```
 
 - `< /dev/null` is **mandatory**. `codex exec` reads stdin and concatenates it
@@ -124,6 +124,8 @@ codex exec \
 - `--sandbox workspace-write` confines writes to the workdir; it cannot escape
   the Claude sandbox dir. Never use `danger-full-access`. (Check flags with
   `codex exec --help`.)
+- `2>&1 | tee /tmp/codex-handoff.log` keeps Codex's output visible **and**
+  captures it so the token report (below) can read Codex's `tokens used` total.
 - Give Codex everything in the prompt (paths, signatures, style, criteria); it
   does not share Claude's conversation context. Prefer a clean-ish git state so
   the handoff diff is reviewable.
@@ -157,6 +159,33 @@ Outcome:
 
 The token win comes from Claude neither generating nor re-deriving the code —
 keep the spec tight and the review as light as the task safely allows.
+
+### Report the token tradeoff (immediately, in a fresh turn)
+
+The moment a handoff returns and review is done, **start a new turn** and run
+the bundled reporter, then print its one-line output verbatim — nothing else:
+
+```bash
+bash "$CLAUDE_SKILL_DIR/token-report.sh" --codex-log /tmp/codex-handoff.log
+```
+
+(If `$CLAUDE_SKILL_DIR` is unset, run `token-report.sh` next to this file.)
+
+It reads two on-disk ledgers — Claude's session transcript
+(`~/.claude/projects/<hashed-cwd>/<session>.jsonl`, summed over the delegation
+turn) and the captured Codex log — and prints exactly:
+
+```
+claude: 1,234in/567out  -->  codex: 15,192 tok
+```
+
+- This is the concrete proof of the credit-arbitrage trade: a small Claude
+  spend (spec + light review) bought a larger Codex spend (the typing), paid
+  from Codex/ChatGPT credits.
+- Do **not** narrate or estimate token counts yourself — only this script's
+  output is authoritative; a model cannot accurately introspect its own usage.
+- `in` for Claude is total tokens read that turn (fresh prompt + cached
+  context); Codex at 0.131 reports a single total, not an in/out split.
 
 ---
 
