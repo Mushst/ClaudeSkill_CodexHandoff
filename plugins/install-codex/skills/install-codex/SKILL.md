@@ -92,55 +92,69 @@ it spends Codex/ChatGPT credits instead of Claude budget. The user opts in
 **per handoff** (or can say "always, stop asking" — honor that for the rest of
 the session).
 
-### Write a handoff manifest, then run Codex headless
+### Run Codex headless (sequence: mark → manifest → dispatch → review → report)
 
-Before delegating, Claude writes a short **handoff manifest** to a temp file —
-a terse bullet list of the exact deliverables and acceptance criteria. This one
-artifact is both Codex's task prompt **and** Claude's review checklist, so the
-later check is a cheap cross-reference instead of fresh analysis. Keep it
-bullets, not prose.
+The resource we value is **default-model Claude tokens**. The metric is the
+default-model marginal tokens spent *because we chose to delegate*. So the
+watermark and report are taken in the **parent (default model)**, around the
+whole delegation — never inside a cheap subagent (that would measure the wrong
+model and omit the manifest/review/dispatch costs that matter).
 
-#### Preferred execution: a Haiku orchestration subagent
+#### 1. Mark in the parent, the moment you decide to delegate
 
-The dominant Claude cost of a handoff is *standing session context re-read on
-every turn*, not the spec. So when a subagent tool is available (Claude Code's
-Task/Agent tool), **dispatch the mechanical run as a subagent pinned to the
-cheapest model** (`model: haiku`). This stacks two wins: a cheaper model *and*
-an isolated, near-empty context — the long run + log parse no longer costs
-default-model tokens on a fat context.
-
-Strict division of labor — **Haiku does plumbing, never judgment**:
-
-- The **Haiku subagent** receives only the manifest text and a fixed recipe:
-  run `token-report.sh mark`, the `codex exec` command below, then
-  `token-report.sh report`; collect `git status -s`, `git diff --stat`, the
-  one-line token report, and the contents of `/tmp/codex-last.md`. It must
-  **not** evaluate correctness. It returns exactly this compact contract:
-
-  ```
-  TOKEN_LINE: <verbatim token-report.sh output>
-  GIT_STATUS: <git status -s>
-  DIFFSTAT:   <git diff --stat>
-  CODEX_MSG:  <contents of /tmp/codex-last.md>
-  RUN_ERROR:  <none | first error/non-zero exit observed>
-  ```
-
-- The **default (calling) model** then does the actual sanity check from that
-  contract — semantic cross-check of the diff against the manifest, pulling a
-  targeted `git diff <file>` only if something looks off. The verbose run log
-  and full diff stay in the subagent's throwaway context; only the small
-  contract crosses back.
-
-Also prefer to **delegate early**, before parent context grows.
-
-If no subagent tool is available (other harnesses, or it's disabled), fall
-back to running the block below inline — correctness is unchanged, only the
-overhead is higher.
+Run this **before writing the manifest**, in the parent/default model, right
+after the user opts in — so the measured span includes the full marginal cost
+of the delegation choice (manifest + dispatch + review + report):
 
 ```bash
-# Watermark Claude's transcript tail BEFORE delegating (for the token report).
 bash "$CLAUDE_SKILL_DIR/token-report.sh" mark
+```
 
+`mark`/`report` read the transcript JSONL in a subprocess; they do **not**
+pull it into model context. Running them in the parent costs the model only
+the tool call — this is *not* the "fat context re-read" overhead (that earlier
+conflation was a bug). Measuring the valued number correctly is the priority.
+
+#### 2. Write the handoff manifest
+
+Claude writes a short **handoff manifest** to a temp file — a terse bullet
+list of the exact deliverables and acceptance criteria. This one artifact is
+both Codex's task prompt **and** Claude's review checklist. Keep it bullets.
+
+#### 3. Preferred dispatch: a Haiku orchestration subagent
+
+When a subagent tool is available (Claude Code's Task/Agent tool), **dispatch
+the mechanical run as a subagent pinned to the cheapest model**
+(`model: haiku`) in an isolated context, so the long run + log parse don't
+cost default-model tokens on a fat context.
+
+Strict division of labor — **Haiku does plumbing, never judgment**, and
+**never runs `mark`/`report`** (those are the parent's, see steps 1 & 5):
+
+- The **Haiku subagent** gets only the manifest text + a fixed recipe: run the
+  `codex exec` command below, then collect `git status -s`, `git diff --stat`,
+  the contents of `/tmp/codex-last.md`, and (optional, informational only) its
+  own cheap span via `token-report.sh report` against its own transcript. It
+  returns exactly this compact contract:
+
+  ```
+  GIT_STATUS:    <git status -s>
+  DIFFSTAT:      <git diff --stat>
+  CODEX_MSG:     <contents of /tmp/codex-last.md>
+  RUN_ERROR:     <none | first error/non-zero exit observed>
+  SUBAGENT_SPAN: <optional: its own token-report line, Haiku-priced>
+  ```
+
+- The **default (calling) model** does the sanity check from that contract —
+  semantic cross-check of the diff against the manifest, pulling a targeted
+  `git diff <file>` only if something looks off. Verbose log + full diff stay
+  in the subagent's throwaway context.
+
+Prefer to **delegate early**, before parent context grows. If no subagent tool
+is available, run the block below inline — correctness unchanged, overhead
+higher.
+
+```bash
 codex exec \
   --cd "$PWD" \
   --sandbox workspace-write \
@@ -176,7 +190,7 @@ codex exec \
   does not share Claude's conversation context. Prefer a clean-ish git state so
   the handoff diff is reviewable.
 
-### Self-review (sanity check — scale to complexity, stay terse)
+### 4. Self-review (sanity check — scale to complexity, stay terse)
 
 The whole point is to save tokens, so do **not** burn them on verbose analysis
 or narrating Codex's output. Codex ran at high reasoning on a precise spec —
@@ -233,46 +247,53 @@ generation clearly dwarfs the spec+review, and say so. Credit arbitrage still
 applies, but spending 27k Codex credits to save 0 net Claude tokens is not a
 win — it's just slower.
 
-### Report the token tradeoff (immediately, in a fresh turn)
+### 5. Report the token tradeoff (parent, after review)
 
-**Preferred (subagent path):** the Haiku subagent already ran
-`token-report.sh report` and returned it as `TOKEN_LINE` in the contract. The
-calling model just **prints `TOKEN_LINE` verbatim** — do **not** re-run the
-reporter on the fat parent context (that re-incurs the very overhead this
-avoids). Note this measures the cheap Haiku orchestration span by design; the
-strong-model review is a separate, deliberately small cost.
-
-**Inline fallback only:** the moment the handoff returns and review is done,
-**start a new turn** and run the reporter, then print its one line verbatim:
+Once review is done, the **parent (default model)** runs the reporter and
+prints its output verbatim — nothing else. This is mandatory and runs in the
+**parent**, not the subagent: it measures the valued resource (default-model
+marginal), and it's an out-of-context file read, so it costs only this call.
 
 ```bash
-bash "$CLAUDE_SKILL_DIR/token-report.sh" report --codex-log /tmp/codex-handoff.log
-# true marginal (subtracts a no-op baseline, if you captured one):
-#   token-report.sh report --codex-log /tmp/codex-handoff.log --minus-baseline
+bash "$CLAUDE_SKILL_DIR/token-report.sh" report \
+  --codex-log /tmp/codex-handoff.log \
+  --outcome "<accepted | N-fixups | reverted>" \
+  # optional, if the subagent returned its own cheap span:
+  # --subagent-span "<SUBAGENT_SPAN from the contract>"
 ```
 
 (If `$CLAUDE_SKILL_DIR` is unset, run `token-report.sh` next to this file.)
 
-It diffs Claude's session transcript between the watermark set by `mark` (just
-before `codex exec`) and the current tail — measuring **exactly the delegation
-+ review span**, not a guessed turn boundary — parses the captured Codex log,
-and prints, e.g.:
+It diffs Claude's transcript from the `mark` watermark (set in step 1, before
+the manifest) to now — so the span is the **full marginal cost of choosing to
+delegate**: manifest + dispatch + review + report. It prints, e.g.:
 
 ```
-claude: 2,310 fresh / 480 cc / 91,572 cr / 1,240 out  (~12k cost-eq; marginal≈fresh+cc 2,790)  -->  codex: 27,284 tok
+claude (default-model handoff-marginal): 2,790 real [fresh+cc]  (= 2,310 fresh + 480 cc; +91,572 cr standing@~0.1 ≈ 12k cost-eq; 1,240 out)
+codex (separate cheap currency, not a ratio): 27,284 tok
+outcome: accepted
 ```
 
-- **`cr` (cache-read) is not real cost.** It bills ~0.1× fresh and is mostly
-  standing session context every turn pays anyway. The honest handoff cost is
-  `fresh + cc` (the `marginal` figure), or the cost-eq. Do not quote the raw
-  sum as "the handoff cost" — that's the overstatement this rewrite fixes.
-- For a **true marginal** number, optionally: `mark` → take one no-op turn →
-  `token-report.sh baseline` → run the handoff → `report --minus-baseline`.
-  That subtracts the standing per-turn context so only the handoff's delta
-  remains.
+Reading it correctly (this is the whole point of the audit fix):
+
+- **The headline is `… real [fresh+cc]`** — default-model tokens that exist
+  *only because* we delegated. That is the efficiency number. `cr` is standing
+  context billed ~0.1×; it is shown for transparency, **never** as the cost.
+- **`codex …` is a different, cheap currency.** No ratio, no arrow, no
+  "Claude vs Codex" comparison — by assumption Codex credits are the plentiful
+  resource; it's context, not a denominator.
+- **`outcome` is the effectiveness half.** A small token cost with
+  `outcome: reverted` or `3-fixups` is an *ineffective* handoff, not a cheap
+  one. Always pass a truthful `--outcome`.
+- We deliberately do **not** emit a counterfactual ("what Claude-only would
+  have cost") — that can't be measured, only estimated, and the skill forbids
+  self-estimated token counts. Worth-it judgement stays the qualitative
+  economics rule above, now anchored by a real cost + a real outcome.
+- Advanced/inline only: `mark` → one no-op turn → `baseline` → handoff →
+  `report --minus-baseline` nets out standing context for a true marginal.
+  Not used in the subagent path.
 - Do **not** narrate or estimate token counts yourself — only this script's
-  output is authoritative; a model cannot accurately introspect its own usage.
-- Codex at 0.131 reports a single total, not an in/out split.
+  output is authoritative; a model cannot introspect its own usage.
 
 ---
 
