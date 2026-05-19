@@ -71,48 +71,71 @@ stating: the task in one line, why it's a good candidate, and that it saves
 Claude tokens. The user opts in **per handoff** (or can say "always, stop
 asking" — honor that for the rest of the session).
 
-### Run Codex headless (self-review permission model)
+### Write a handoff manifest, then run Codex headless
 
-Claude is the reviewer; the user already gave the go-ahead, so run Codex
-autonomously but **confined to the working directory**:
+Before delegating, Claude writes a short **handoff manifest** to a temp file —
+a terse bullet list of the exact deliverables and acceptance criteria. This one
+artifact is both Codex's task prompt **and** Claude's review checklist, so the
+later check is a cheap cross-reference instead of fresh analysis. Keep it
+bullets, not prose.
 
 ```bash
 codex exec \
   --cd "$PWD" \
   --sandbox workspace-write \
-  "<precise, self-contained task prompt including explicit acceptance criteria>"
+  -c approval_policy="never" \
+  -c model_reasoning_effort="high" \
+  "$(cat /tmp/handoff-manifest.md)" \
+  < /dev/null
 ```
 
-- `--sandbox workspace-write` lets it write only within the workdir; it cannot
-  escape the Claude sandbox directory. (Verify available flags with
-  `codex exec --help`; never use `danger-full-access`.)
-- Approval is non-interactive (`never` by default) — this is the intended
-  "self review" model: no human approval loop, Claude validates after.
-- Give Codex everything it needs in the prompt (paths, signatures, style,
-  acceptance criteria). It does not share Claude's conversation context.
-- Prefer a clean-ish git state first so the handoff diff is reviewable.
+- `< /dev/null` is **mandatory**. `codex exec` reads stdin and concatenates it
+  with the prompt, then blocks on stdin EOF. With no controlling tty
+  (background task, CI, nested agent) stdin never closes and Codex hangs
+  forever at 0% CPU with no output. Always redirect stdin.
+- `-c approval_policy="never"` is **mandatory**. A user `~/.codex/config.toml`
+  may set `approval_policy = "on-request"`, which overrides `exec`'s
+  non-interactive default and silently blocks waiting for an approval that
+  never comes. Force it off explicitly; don't rely on the default.
+- `-c model_reasoning_effort="high"` — Codex is a capable model; high reasoning
+  makes it reliable on well-specified work, which is what lets Claude's review
+  stay lightweight.
+- `--sandbox workspace-write` confines writes to the workdir; it cannot escape
+  the Claude sandbox dir. Never use `danger-full-access`. (Check flags with
+  `codex exec --help`.)
+- Give Codex everything in the prompt (paths, signatures, style, criteria); it
+  does not share Claude's conversation context. Prefer a clean-ish git state so
+  the handoff diff is reviewable.
 
-### Self-review (mandatory — this is how quality is guaranteed)
+### Self-review (sanity check — scale to complexity, stay terse)
 
-After Codex returns, Claude MUST:
+The whole point is to save tokens, so do **not** burn them on verbose analysis
+or narrating Codex's output. Codex ran at high reasoning on a precise spec —
+trust but verify, proportionate to risk.
 
-1. Inspect what changed: `git diff` (and `git status` for new files).
-2. Check every stated acceptance criterion is met.
-3. Run the relevant build / tests / linter / type-check.
-4. Read the code for correctness, security, and fit with the codebase.
+**Default (mechanical / well-specified task) — lightweight semantic check:**
+read the diff against the handoff manifest and confirm only:
 
-Then:
+1. every manifest point is implemented,
+2. nothing out-of-scope, weird, or unrequested was added,
+3. it builds / obvious tests pass — one cheap command, if applicable.
 
-- **Satisfactory** → keep it; briefly report what was delegated and that it
-  passed review.
-- **Minor gaps** → issue one or two more focused `codex exec` prompts to fix
-  specifics.
-- **Unsatisfactory / not converging after ~2 iterations** → revert or take
-  over directly. Don't burn the token savings chasing a bad handoff.
+That's it. No line-by-line audit, no diff dumps back to the user.
 
-Always tell the user the outcome and the rough tradeoff (delegated vs. review
-cost). The token win comes from Claude not generating the code — keep Claude's
-spec and review tight.
+**Ramp up only as complexity/risk rises** (security-sensitive, cross-cutting,
+non-obvious logic, large surface): add a full correctness/edge-case/codebase-fit
+read and run the real test / lint / type suite.
+
+Outcome:
+
+- **Pass** → keep it. Report in **one line**: what was delegated + "review
+  passed". Nothing more.
+- **Minor gaps** → one or two focused follow-up `codex exec` prompts.
+- **Not converging in ~2 iterations** → revert or take over. Don't burn the
+  savings chasing a bad handoff.
+
+The token win comes from Claude neither generating nor re-deriving the code —
+keep the spec tight and the review as light as the task safely allows.
 
 ---
 
