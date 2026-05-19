@@ -100,6 +100,13 @@ artifact is both Codex's task prompt **and** Claude's review checklist, so the
 later check is a cheap cross-reference instead of fresh analysis. Keep it
 bullets, not prose.
 
+**Run the handoff in a subagent with clean context, early in the session.**
+The dominant Claude cost of a handoff is *standing session context re-read on
+every turn*, not the spec itself — so dispatch `codex exec` from a fresh
+subagent (e.g. the Task/Agent tool) carrying only the manifest, and prefer to
+delegate early before context grows. A handoff bolted onto a long session pays
+that big per-turn context tax twice (run + report) for little marginal gain.
+
 ```bash
 # Watermark Claude's transcript tail BEFORE delegating (for the token report).
 bash "$CLAUDE_SKILL_DIR/token-report.sh" mark
@@ -109,8 +116,9 @@ codex exec \
   --sandbox workspace-write \
   -c approval_policy="never" \
   -c model_reasoning_effort="high" \
+  -o /tmp/codex-last.md \
   "$(cat /tmp/handoff-manifest.md)" \
-  < /dev/null 2>&1 | tee /tmp/codex-handoff.log
+  < /dev/null > /tmp/codex-handoff.log 2>&1
 ```
 
 - `< /dev/null` is **mandatory**. `codex exec` reads stdin and concatenates it
@@ -127,8 +135,13 @@ codex exec \
 - `--sandbox workspace-write` confines writes to the workdir; it cannot escape
   the Claude sandbox dir. Never use `danger-full-access`. (Check flags with
   `codex exec --help`.)
-- `2>&1 | tee /tmp/codex-handoff.log` keeps Codex's output visible **and**
-  captures it so the token report (below) can read Codex's `tokens used` total.
+- `> /tmp/codex-handoff.log 2>&1` (note: **no `| tee`**). The full Codex log is
+  verbose; piping it back through Claude's context is pure waste — it was the
+  bulk of the measured handoff overhead. Redirect to a file only. The token
+  reporter parses that file out-of-context for the `tokens used` total; Claude
+  never reads the raw log.
+- `-o /tmp/codex-last.md` writes Codex's **final message only**. For review,
+  Claude reads just that file plus `git diff` — never the full run log.
 - Give Codex everything in the prompt (paths, signatures, style, criteria); it
   does not share Claude's conversation context. Prefer a clean-ish git state so
   the handoff diff is reviewable.
@@ -138,6 +151,10 @@ codex exec \
 The whole point is to save tokens, so do **not** burn them on verbose analysis
 or narrating Codex's output. Codex ran at high reasoning on a precise spec —
 trust but verify, proportionate to risk.
+
+Review inputs are **only** `git diff` (and `git status` for new files) plus
+`/tmp/codex-last.md` (Codex's final message). Never `cat` the full run log —
+that defeats the purpose.
 
 **Default (mechanical / well-specified task) — lightweight semantic check:**
 read the diff against the handoff manifest and confirm only:
@@ -163,6 +180,27 @@ Outcome:
 The token win comes from Claude neither generating nor re-deriving the code —
 keep the spec tight and the review as light as the task safely allows.
 
+### When a handoff actually pays off (economics — read before offering)
+
+A handoff is **not free**. Claude still pays: the manifest, the review, and —
+dominant — standing session context re-read on the run turn and the report
+turn. Empirically, a trivial 4-line task cost ~7k Claude marginal tokens of
+pure overhead while Codex did the same work for ~27k of *its* credits.
+
+So the trade only wins when **Codex writes substantially more than the
+spec + diff Claude must read back**. Rule of thumb:
+
+- **Good**: sizeable generation from a tight spec — many files, boilerplate at
+  scale, big mechanical refactor, a full test suite. Codex output ≫ review
+  surface.
+- **Loses to overhead**: small/trivial edits, a few lines, anything where the
+  diff Claude reads is close to what Codex wrote. Just do it directly.
+
+Bias the `AskUserQuestion` offer accordingly: only pitch a handoff when the
+generation clearly dwarfs the spec+review, and say so. Credit arbitrage still
+applies, but spending 27k Codex credits to save 0 net Claude tokens is not a
+win — it's just slower.
+
 ### Report the token tradeoff (immediately, in a fresh turn)
 
 The moment a handoff returns and review is done, **start a new turn** and run
@@ -170,26 +208,32 @@ the bundled reporter, then print its one-line output verbatim — nothing else:
 
 ```bash
 bash "$CLAUDE_SKILL_DIR/token-report.sh" report --codex-log /tmp/codex-handoff.log
+# true marginal (subtracts a no-op baseline, if you captured one):
+#   token-report.sh report --codex-log /tmp/codex-handoff.log --minus-baseline
 ```
 
 (If `$CLAUDE_SKILL_DIR` is unset, run `token-report.sh` next to this file.)
 
-It diffs Claude's session transcript between the watermark set by `mark` (run
-just before `codex exec`) and the current tail — so it measures **exactly the
-delegation + review span**, not a guessed turn boundary — then parses the
-captured Codex log, and prints exactly:
+It diffs Claude's session transcript between the watermark set by `mark` (just
+before `codex exec`) and the current tail — measuring **exactly the delegation
++ review span**, not a guessed turn boundary — parses the captured Codex log,
+and prints, e.g.:
 
 ```
-claude: 1,234in/567out  -->  codex: 15,192 tok
+claude: 2,310 fresh / 480 cc / 91,572 cr / 1,240 out  (~12k cost-eq; marginal≈fresh+cc 2,790)  -->  codex: 27,284 tok
 ```
 
-- This is the concrete proof of the credit-arbitrage trade: a small Claude
-  spend (spec + light review) bought a larger Codex spend (the typing), paid
-  from Codex/ChatGPT credits.
+- **`cr` (cache-read) is not real cost.** It bills ~0.1× fresh and is mostly
+  standing session context every turn pays anyway. The honest handoff cost is
+  `fresh + cc` (the `marginal` figure), or the cost-eq. Do not quote the raw
+  sum as "the handoff cost" — that's the overstatement this rewrite fixes.
+- For a **true marginal** number, optionally: `mark` → take one no-op turn →
+  `token-report.sh baseline` → run the handoff → `report --minus-baseline`.
+  That subtracts the standing per-turn context so only the handoff's delta
+  remains.
 - Do **not** narrate or estimate token counts yourself — only this script's
   output is authoritative; a model cannot accurately introspect its own usage.
-- `in` for Claude is total tokens read that turn (fresh prompt + cached
-  context); Codex at 0.131 reports a single total, not an in/out split.
+- Codex at 0.131 reports a single total, not an in/out split.
 
 ---
 
