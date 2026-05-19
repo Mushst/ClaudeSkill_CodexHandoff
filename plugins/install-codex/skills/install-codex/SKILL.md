@@ -42,14 +42,22 @@ also what makes Claude's later review cheap, which is where the savings hold up.
 
 `codex exec` needs auth. The installer only reports status.
 
-- **Headless / remote container (common):** run `codex login --device-auth`
-  as a **background** process (it must keep running to poll). Read its log for
-  the one-time code + `https://auth.openai.com/codex/device`, give both to the
+**Default: device auth.** Always use `codex login --device-auth` unless the
+user explicitly asks for the API-key path. Do **not** prompt for or ask about
+an API key — most users authenticate with a ChatGPT subscription, and device
+auth is the only flow that works in headless / remote containers.
+
+- **Device auth (default — do this):** run `codex login --device-auth` as a
+  **background** process (it must keep running to poll). Read its log for the
+  one-time code + `https://auth.openai.com/codex/device`, give both to the
   user, wait for the background task to finish, then verify with
   `codex login status`.
-- **API key:** `printenv OPENAI_API_KEY | codex login --with-api-key`.
+- **API key (only if the user explicitly opts in):** if — and only if — the
+  user states they want to use an API key, run
+  `printenv OPENAI_API_KEY | codex login --with-api-key`. Never default here,
+  never ask the user to supply a key unprompted.
 - The no-flag `codex login` opens `localhost:1455` and will NOT work in an
-  isolated remote container — always prefer `--device-auth` there.
+  isolated remote container — never use it; prefer `--device-auth` always.
 
 Confirm end-to-end: `codex exec "acknowledge this message"`.
 
