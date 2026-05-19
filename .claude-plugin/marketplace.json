@@ -1,0 +1,17 @@
+{
+  "name": "claude-skill-codex-handoff",
+  "owner": {
+    "name": "Mushst"
+  },
+  "metadata": {
+    "description": "Personal Claude Code marketplace. Hosts the install-codex plugin.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "install-codex",
+      "source": "./plugins/install-codex",
+      "description": "Install the OpenAI Codex CLI + bubblewrap, and delegate low-complexity code-writing to Codex as a headless agent to save Claude tokens."
+    }
+  ]
+}
