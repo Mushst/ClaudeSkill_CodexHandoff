@@ -1,6 +1,6 @@
 ---
 name: install-codex
-description: Install the OpenAI Codex CLI + bubblewrap, and use Codex as a headless agent Claude can hand low-complexity code-writing off to in order to save Claude tokens. Use when the user asks to install/set up Codex, or when a code task is mechanical enough to delegate to a cheaper model ("hand this to codex/gpt", "offload this", "save tokens").
+description: Install the OpenAI Codex CLI + bubblewrap, and use Codex as a headless agent Claude can hand clearly-specified code-writing off to — spending Codex/ChatGPT credits instead of Claude budget (credit arbitrage), not because Codex is a weaker model. Use when the user asks to install/set up Codex, or when a code task has a precise input/output spec and the user wants to conserve Claude budget ("hand this to codex/gpt", "offload this", "save tokens", "use my codex credits").
 ---
 
 # Install & Delegate to Codex
@@ -8,9 +8,21 @@ description: Install the OpenAI Codex CLI + bubblewrap, and use Codex as a headl
 Two capabilities:
 
 1. **Install** the OpenAI Codex CLI (`@openai/codex`) + `bubblewrap` sandbox.
-2. **Delegate** suitable code-writing to Codex running headless (`codex exec`),
-   so a cheaper model does the typing while Claude specs and reviews — saving
-   Claude tokens.
+2. **Delegate** clearly-specified code-writing to Codex running headless
+   (`codex exec`): Claude specs and lightly reviews, Codex does the typing.
+
+### Why this is worth doing (the actual rationale)
+
+The win is **credit arbitrage, not a cheaper model.** Codex (`gpt-5.5` at high
+reasoning) is a capable model — the point is *which budget pays*: offloading to
+`codex exec` spends Codex/ChatGPT credit headroom instead of Claude budget. Use
+it when Codex credits are the more plentiful resource.
+
+The gate is **spec clarity, not model tier.** Codex is reliable on tasks with a
+precise, defined input/output spec (functions to a contract, scaffolding,
+mechanical refactors, test stubs). Trust it less for open-ended thinking,
+design, or creative problem-solving — keep those on Claude. A tight spec is
+also what makes Claude's later review cheap, which is where the savings hold up.
 
 ---
 
@@ -43,7 +55,7 @@ Confirm end-to-end: `codex exec "acknowledge this message"`.
 
 ---
 
-## Part 2 — Delegate code-writing to Codex (token-saving handoff)
+## Part 2 — Delegate code-writing to Codex (credit-arbitrage handoff)
 
 ### When to consider a handoff
 
@@ -51,10 +63,10 @@ Offer a handoff only when ALL of these hold:
 
 - The task is **code-writing** (not analysis, design, or debugging that needs
   judgment).
-- It is **mechanical / well-specified** and, in Claude's judgement, doable by a
-  model **lower-tier than the currently selected Claude model** — e.g.
-  boilerplate, scaffolding, repetitive edits, straightforward functions from a
-  clear spec, test stubs, mechanical refactors, format/lint fixups.
+- It has a **precise, defined input/output spec** — boilerplate, scaffolding,
+  repetitive edits, functions to a clear contract, test stubs, mechanical
+  refactors, format/lint fixups. The gate is spec clarity, **not** "is Codex
+  good enough" — it is; ambiguity is the disqualifier, not difficulty tier.
 - Acceptance criteria can be stated **precisely up front**.
 - It is confined to the working (sandbox) directory and needs **no secrets,
   credentials, or network** beyond policy.
@@ -67,9 +79,10 @@ it.
 ### Always ask the user first
 
 Never auto-delegate silently. Use `AskUserQuestion` to offer the handoff,
-stating: the task in one line, why it's a good candidate, and that it saves
-Claude tokens. The user opts in **per handoff** (or can say "always, stop
-asking" — honor that for the rest of the session).
+stating: the task in one line, why it's a good candidate (clear spec), and that
+it spends Codex/ChatGPT credits instead of Claude budget. The user opts in
+**per handoff** (or can say "always, stop asking" — honor that for the rest of
+the session).
 
 ### Write a handoff manifest, then run Codex headless
 
