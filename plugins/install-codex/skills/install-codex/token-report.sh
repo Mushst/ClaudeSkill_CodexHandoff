@@ -1,111 +1,114 @@
 #!/usr/bin/env bash
-# token-report.sh — after a Codex handoff, print a one-line cost comparison:
+# token-report.sh — measure exactly what a Codex handoff cost on each side.
 #
-#   claude: 108,236in/1,103out  -->  codex: 15,192 tok
+# Two calls, watermark-based (no turn-boundary guessing):
 #
-# Claude numbers come from the harness's own session transcript on disk
-# (~/.claude/projects/<hashed-cwd>/<session>.jsonl); Codex numbers come from
-# the captured `codex exec` log. Read-only; introspects no model, just ledgers.
+#   1. Right BEFORE `codex exec`:   token-report.sh mark
+#        Records the current tail of Claude's session transcript.
+#   2. AFTER the handoff + review:  token-report.sh report --codex-log PATH
+#        Sums Claude usage from the marked tail to the new tail (= exactly the
+#        delegation + review span) and parses the captured Codex log, then
+#        prints one line:
 #
-# Usage:
-#   token-report.sh [--codex-log PATH] [--session JSONL] [--since-last-user]
+#            claude: 1,234in/567out  -->  codex: 15,192 tok
 #
-#   --codex-log PATH   Codex run log to parse (default: ./codex-run.log)
-#   --session  JSONL   Claude transcript (default: newest for $PWD's project)
-#   --since-last-user  Sum only assistant turns after the last user message
-#                      (default; this is "the delegation turn"). Pass
-#                      --whole-session to sum the entire session instead.
+# Claude numbers come from the harness's own on-disk transcript
+# (~/.claude/projects/<hashed-cwd>/<session>.jsonl); Codex numbers from the
+# captured `codex exec` log. Read-only; reads ledgers, introspects no model.
+#
+# Options:
+#   --state PATH       watermark file (default: /tmp/codex-handoff.mark)
+#   --codex-log PATH   Codex run log to parse   (default: ./codex-run.log)
+#   --session JSONL    transcript override (default: newest for $PWD's project)
 set -euo pipefail
 
+CMD="${1:-}"; [ $# -gt 0 ] && shift || true
+STATE="/tmp/codex-handoff.mark"
 CODEX_LOG="./codex-run.log"
 SESSION=""
-SCOPE="since-last-user"
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --state) STATE="$2"; shift 2 ;;
     --codex-log) CODEX_LOG="$2"; shift 2 ;;
     --session) SESSION="$2"; shift 2 ;;
-    --since-last-user) SCOPE="since-last-user"; shift ;;
-    --whole-session) SCOPE="whole"; shift ;;
-    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-# --- locate the Claude session transcript ----------------------------------
-if [ -z "$SESSION" ]; then
-  proj_hash=$(printf '%s' "$PWD" | sed 's#[^a-zA-Z0-9]#-#g')
-  proj_dir="$HOME/.claude/projects/$proj_hash"
-  if [ -d "$proj_dir" ]; then
-    SESSION=$(ls -t "$proj_dir"/*.jsonl 2>/dev/null | head -1 || true)
-  fi
-fi
+resolve_session() {
+  if [ -n "$SESSION" ]; then printf '%s' "$SESSION"; return; fi
+  local h d
+  h=$(printf '%s' "$PWD" | sed 's#[^a-zA-Z0-9]#-#g')
+  d="$HOME/.claude/projects/$h"
+  [ -d "$d" ] && ls -t "$d"/*.jsonl 2>/dev/null | head -1 || true
+}
 
-claude_str="claude: (no transcript found)"
-if [ -n "${SESSION:-}" ] && [ -f "$SESSION" ]; then
-  claude_str=$(SCOPE="$SCOPE" python3 - "$SESSION" <<'PY'
-import json, sys, os
+case "$CMD" in
+  mark)
+    S=$(resolve_session)
+    if [ -z "$S" ] || [ ! -f "$S" ]; then
+      echo "token-report: no session transcript found; cannot mark" >&2
+      exit 1
+    fi
+    # Tail = current line count. The in-flight delegation turn is not yet
+    # flushed, so this baseline correctly excludes it.
+    LINES=$(wc -l < "$S" | tr -d ' ')
+    printf 'session=%s\nlines=%s\n' "$S" "$LINES" > "$STATE"
+    echo "token-report: marked $S @ ${LINES} lines"
+    ;;
 
+  report)
+    if [ ! -f "$STATE" ]; then
+      echo "claude: (no mark — call 'token-report.sh mark' before codex exec)  -->  codex: (skipped)"
+      exit 0
+    fi
+    S=$(sed -n 's/^session=//p' "$STATE")
+    OFFSET=$(sed -n 's/^lines=//p' "$STATE")
+    [ -n "$SESSION" ] && S="$SESSION"
+
+    claude_str="claude: (transcript gone)"
+    if [ -n "$S" ] && [ -f "$S" ]; then
+      claude_str=$(OFFSET="${OFFSET:-0}" python3 - "$S" <<'PY'
+import json, os, sys
 path = sys.argv[1]
-scope = os.environ.get("SCOPE", "since-last-user")
-
-lines = []
+offset = int(os.environ.get("OFFSET", "0"))
+inp = out = cc = cr = 0
+seen = False
 with open(path, "r", errors="replace") as fh:
-    for raw in fh:
+    for n, raw in enumerate(fh):
+        if n < offset:            # only lines added since the mark
+            continue
         raw = raw.strip()
         if not raw:
             continue
         try:
-            lines.append(json.loads(raw))
+            d = json.loads(raw)
         except Exception:
             continue
-
-# Find the index of the last user-authored message; sum assistant usage after it.
-start = 0
-if scope == "since-last-user":
-    for i, d in enumerate(lines):
-        t = d.get("type") or d.get("role")
         msg = d.get("message", {}) if isinstance(d.get("message"), dict) else {}
-        role = msg.get("role") or t
-        if role == "user":
-            start = i
-
-inp = out = cc = cr = 0
-seen = False
-for d in lines[start:]:
-    msg = d.get("message", {}) if isinstance(d.get("message"), dict) else {}
-    u = msg.get("usage") or d.get("usage")
-    if not isinstance(u, dict):
-        continue
-    seen = True
-    inp += u.get("input_tokens", 0) or 0
-    out += u.get("output_tokens", 0) or 0
-    cc  += u.get("cache_creation_input_tokens", 0) or 0
-    cr  += u.get("cache_read_input_tokens", 0) or 0
-
+        u = msg.get("usage") or d.get("usage")
+        if not isinstance(u, dict):
+            continue
+        seen = True
+        inp += u.get("input_tokens", 0) or 0
+        out += u.get("output_tokens", 0) or 0
+        cc  += u.get("cache_creation_input_tokens", 0) or 0
+        cr  += u.get("cache_read_input_tokens", 0) or 0
 if not seen:
-    print("claude: (no usage records)")
+    print("claude: (0 — no flushed usage in span yet)")
 else:
-    # "in" = everything the model had to read this turn (fresh prompt + cached
-    # context + cache writes); "out" = generated tokens.
-    total_in = inp + cc + cr
-    print(f"claude: {total_in:,}in/{out:,}out")
+    print(f"claude: {inp + cc + cr:,}in/{out:,}out")
 PY
 )
-fi
+    fi
 
-# --- parse the Codex run log ----------------------------------------------
-codex_str="codex: (no log at $CODEX_LOG)"
-if [ -f "$CODEX_LOG" ]; then
-  codex_str=$(python3 - "$CODEX_LOG" <<'PY'
+    codex_str="codex: (no log at $CODEX_LOG)"
+    if [ -f "$CODEX_LOG" ]; then
+      codex_str=$(python3 - "$CODEX_LOG" <<'PY'
 import json, re, sys
-
-path = sys.argv[1]
-text = open(path, "r", errors="replace").read()
-
+text = open(sys.argv[1], "r", errors="replace").read()
 ci = co = ctot = 0
-
-# 1) JSONL events (codex exec --json): look for token_count / usage events.
 for line in text.splitlines():
     line = line.strip()
     if not (line.startswith("{") and '"' in line):
@@ -120,19 +123,13 @@ for line in text.splitlines():
         co = co or u.get("output_tokens", 0) or u.get("completion_tokens", 0) or 0
         if u.get("total_tokens"):
             ctot = u["total_tokens"]
-
-# 2) Plain "Token usage: input=.. output=.." style, if present.
 m = re.search(r"input[ =:]+([\d,]+).*?output[ =:]+([\d,]+)", text, re.I | re.S)
 if m and not (ci or co):
-    ci = int(m.group(1).replace(",", ""))
-    co = int(m.group(2).replace(",", ""))
-
-# 3) Fallback: the single "tokens used\n<number>" total (codex 0.131 plain log).
+    ci = int(m.group(1).replace(",", "")); co = int(m.group(2).replace(",", ""))
 if not (ci or co or ctot):
     m = re.search(r"tokens used\s*[\r\n]+\s*([\d,]+)", text, re.I)
     if m:
         ctot = int(m.group(1).replace(",", ""))
-
 if ci or co:
     print(f"codex: {ci:,}in/{co:,}out")
 elif ctot:
@@ -141,6 +138,15 @@ else:
     print("codex: (no token total in log)")
 PY
 )
-fi
+    fi
 
-echo "$claude_str  -->  $codex_str"
+    echo "$claude_str  -->  $codex_str"
+    ;;
+
+  -h|--help|help|"")
+    grep '^#' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown command: $CMD (expected: mark | report)" >&2
+    exit 2 ;;
+esac

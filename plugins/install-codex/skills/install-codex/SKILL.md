@@ -101,6 +101,9 @@ later check is a cheap cross-reference instead of fresh analysis. Keep it
 bullets, not prose.
 
 ```bash
+# Watermark Claude's transcript tail BEFORE delegating (for the token report).
+bash "$CLAUDE_SKILL_DIR/token-report.sh" mark
+
 codex exec \
   --cd "$PWD" \
   --sandbox workspace-write \
@@ -166,14 +169,15 @@ The moment a handoff returns and review is done, **start a new turn** and run
 the bundled reporter, then print its one-line output verbatim — nothing else:
 
 ```bash
-bash "$CLAUDE_SKILL_DIR/token-report.sh" --codex-log /tmp/codex-handoff.log
+bash "$CLAUDE_SKILL_DIR/token-report.sh" report --codex-log /tmp/codex-handoff.log
 ```
 
 (If `$CLAUDE_SKILL_DIR` is unset, run `token-report.sh` next to this file.)
 
-It reads two on-disk ledgers — Claude's session transcript
-(`~/.claude/projects/<hashed-cwd>/<session>.jsonl`, summed over the delegation
-turn) and the captured Codex log — and prints exactly:
+It diffs Claude's session transcript between the watermark set by `mark` (run
+just before `codex exec`) and the current tail — so it measures **exactly the
+delegation + review span**, not a guessed turn boundary — then parses the
+captured Codex log, and prints exactly:
 
 ```
 claude: 1,234in/567out  -->  codex: 15,192 tok
