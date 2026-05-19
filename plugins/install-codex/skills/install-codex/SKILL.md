@@ -100,12 +100,42 @@ artifact is both Codex's task prompt **and** Claude's review checklist, so the
 later check is a cheap cross-reference instead of fresh analysis. Keep it
 bullets, not prose.
 
-**Run the handoff in a subagent with clean context, early in the session.**
+#### Preferred execution: a Haiku orchestration subagent
+
 The dominant Claude cost of a handoff is *standing session context re-read on
-every turn*, not the spec itself — so dispatch `codex exec` from a fresh
-subagent (e.g. the Task/Agent tool) carrying only the manifest, and prefer to
-delegate early before context grows. A handoff bolted onto a long session pays
-that big per-turn context tax twice (run + report) for little marginal gain.
+every turn*, not the spec. So when a subagent tool is available (Claude Code's
+Task/Agent tool), **dispatch the mechanical run as a subagent pinned to the
+cheapest model** (`model: haiku`). This stacks two wins: a cheaper model *and*
+an isolated, near-empty context — the long run + log parse no longer costs
+default-model tokens on a fat context.
+
+Strict division of labor — **Haiku does plumbing, never judgment**:
+
+- The **Haiku subagent** receives only the manifest text and a fixed recipe:
+  run `token-report.sh mark`, the `codex exec` command below, then
+  `token-report.sh report`; collect `git status -s`, `git diff --stat`, the
+  one-line token report, and the contents of `/tmp/codex-last.md`. It must
+  **not** evaluate correctness. It returns exactly this compact contract:
+
+  ```
+  TOKEN_LINE: <verbatim token-report.sh output>
+  GIT_STATUS: <git status -s>
+  DIFFSTAT:   <git diff --stat>
+  CODEX_MSG:  <contents of /tmp/codex-last.md>
+  RUN_ERROR:  <none | first error/non-zero exit observed>
+  ```
+
+- The **default (calling) model** then does the actual sanity check from that
+  contract — semantic cross-check of the diff against the manifest, pulling a
+  targeted `git diff <file>` only if something looks off. The verbose run log
+  and full diff stay in the subagent's throwaway context; only the small
+  contract crosses back.
+
+Also prefer to **delegate early**, before parent context grows.
+
+If no subagent tool is available (other harnesses, or it's disabled), fall
+back to running the block below inline — correctness is unchanged, only the
+overhead is higher.
 
 ```bash
 # Watermark Claude's transcript tail BEFORE delegating (for the token report).
@@ -152,9 +182,11 @@ The whole point is to save tokens, so do **not** burn them on verbose analysis
 or narrating Codex's output. Codex ran at high reasoning on a precise spec —
 trust but verify, proportionate to risk.
 
-Review inputs are **only** `git diff` (and `git status` for new files) plus
-`/tmp/codex-last.md` (Codex's final message). Never `cat` the full run log —
-that defeats the purpose.
+Review inputs are **only** the subagent's returned contract (`GIT_STATUS`,
+`DIFFSTAT`, `CODEX_MSG`) — or, on the inline fallback, `git status -s` +
+`git diff` + `/tmp/codex-last.md`. Pull a targeted `git diff <file>` only if
+the contract shows something off. Never `cat` the full run log — that defeats
+the purpose.
 
 **Default (mechanical / well-specified task) — lightweight semantic check:**
 read the diff against the handoff manifest and confirm only:
@@ -203,8 +235,15 @@ win — it's just slower.
 
 ### Report the token tradeoff (immediately, in a fresh turn)
 
-The moment a handoff returns and review is done, **start a new turn** and run
-the bundled reporter, then print its one-line output verbatim — nothing else:
+**Preferred (subagent path):** the Haiku subagent already ran
+`token-report.sh report` and returned it as `TOKEN_LINE` in the contract. The
+calling model just **prints `TOKEN_LINE` verbatim** — do **not** re-run the
+reporter on the fat parent context (that re-incurs the very overhead this
+avoids). Note this measures the cheap Haiku orchestration span by design; the
+strong-model review is a separate, deliberately small cost.
+
+**Inline fallback only:** the moment the handoff returns and review is done,
+**start a new turn** and run the reporter, then print its one line verbatim:
 
 ```bash
 bash "$CLAUDE_SKILL_DIR/token-report.sh" report --codex-log /tmp/codex-handoff.log
