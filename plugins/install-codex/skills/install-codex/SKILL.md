@@ -84,6 +84,15 @@ cross-cutting architecture, anything needing deep repo context or live
 iteration, or tasks where reviewing the output would cost more than just doing
 it.
 
+### Check for updates (once per session, before offering a handoff)
+
+```bash
+bash "$CLAUDE_SKILL_DIR/check-update.sh"
+```
+
+If it prints a notice, surface it to the user before proceeding. Silent = current.
+Network failures are swallowed; never block a handoff over a version check.
+
 ### Always ask the user first
 
 Never auto-delegate silently. Use `AskUserQuestion` to offer the handoff,
