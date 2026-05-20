@@ -14,8 +14,8 @@
 #     overhead; that conflation was a prior bug.
 #
 # CAVEAT: Claude input is fresh + cache-creation + cache-read, billed very
-# differently (cr ~0.1x fresh, cc ~1.25x). The honest cost is fresh+cc ("real");
-# cr is standing context, reported separately, never summed in as cost.
+# differently (cr ~0.1x fresh, cc ~1.25x). The output shows fresh + cc as the
+# cost-driving input; cr (standing context) is reported separately, never summed.
 #
 # Codex tokens are a SEPARATE, cheap currency (credit arbitrage). They are
 # reported for context only — never a ratio/comparison with the Claude figure.
@@ -26,9 +26,10 @@
 #   1. On deciding to delegate (before writing the manifest): token-report.sh mark
 #   2. ... author manifest, dispatch handoff (subagent or inline), review ...
 #   3. token-report.sh report --codex-log P --outcome accepted
-#        -> claude (default-model handoff-marginal): 2,790 real [fresh+cc] ...
-#           codex (separate cheap currency, not a ratio): 27,284 tok
-#           outcome: accepted
+#        ->          input(1×)  cache-write(1.25×)  output(5×)  cache-read(0.1×)
+#           claude      1,000           1,790           500          25,000
+#           codex   27,284 tok
+#           result  accepted
 #
 # Options:
 #   --state PATH        watermark file       (default: /tmp/codex-handoff.mark)
@@ -41,7 +42,7 @@
 #                       as an informational extra line (never the headline)
 #
 # Cost weights (approx list-price ratios; override with env):
-#   W_FRESH=1.0  W_CC=1.25  W_CR=0.1
+#   W_OUT=5.0   (output vs input price ratio; ~5× for Sonnet, varies by model)
 set -euo pipefail
 
 CMD="${1:-}"; [ $# -gt 0 ] && shift || true
@@ -147,18 +148,21 @@ case "$CMD" in
       else
         BASE="0 0 0 0"
         [ "$MINUS_BASE" = "1" ] && [ -f "$BASEFILE" ] && BASE=$(cat "$BASEFILE")
-        claude_str=$(W_FRESH="$W_FRESH" W_CC="$W_CC" W_CR="$W_CR" \
-          MINUS="$MINUS_BASE" python3 - "$U" "$BASE" <<'PY'
+        claude_str=$(MINUS="$MINUS_BASE" W_OUT="${W_OUT:-5.0}" python3 - "$U" "$BASE" <<'PY'
 import os, sys
 f, cc, cr, out = map(int, sys.argv[1].split())
 bf, bcc, bcr, bout = map(int, sys.argv[2].split())
 minus = os.environ.get("MINUS") == "1"
 if minus:
     f, cc, cr, out = max(f-bf,0), max(cc-bcc,0), max(cr-bcr,0), max(out-bout,0)
-wf, wcc, wcr = (float(os.environ[k]) for k in ("W_FRESH","W_CC","W_CR"))
-real = f + cc  # the honest cost; cache_read is standing context @ ~0.1x
-src = " [vs-baseline]" if minus else ""
-print(f"claude  {real:,} real{src}   {f:,} fresh + {cc:,} cc   {out:,} out   [+{cr:,} cr ctx]")
+src = "  [vs-baseline]" if minus else ""
+w_out = float(os.environ.get("W_OUT", "5.0"))
+pad = " " * 9
+hdrs = ["input(1×)", "cache-write(1.25×)", f"output({w_out:g}×)", "cache-read(0.1×)"]
+vals = [f, cc, out, cr]
+ws   = [max(len(h), len(f"{v:,}")) + 2 for h, v in zip(hdrs, vals)]
+print(pad + "".join(h.rjust(w) for h, w in zip(hdrs, ws)))
+print("claude   " + "".join(f"{v:>{w},}" for v, w in zip(vals, ws)) + src)
 PY
 )
       fi
