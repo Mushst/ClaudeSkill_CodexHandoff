@@ -115,11 +115,23 @@ pull it into model context. Running them in the parent costs the model only
 the tool call — this is *not* the "fat context re-read" overhead (that earlier
 conflation was a bug). Measuring the valued number correctly is the priority.
 
-#### 2. Write the handoff manifest
+#### 2. Create the per-run dir and write the handoff manifest
 
-Claude writes a short **handoff manifest** to a temp file — a terse bullet
-list of the exact deliverables and acceptance criteria. This one artifact is
-both Codex's task prompt **and** Claude's review checklist. Keep it bullets.
+Every handoff gets its **own** temp dir so a stale artifact from a previous run
+can never be mistaken for the current one. In the parent, before writing the
+manifest:
+
+```bash
+export RUN_DIR=$(mktemp -d /tmp/codex-handoff.XXXXXX)
+```
+
+Then write the handoff manifest to `$RUN_DIR/manifest.md` — a terse bullet list
+of the exact deliverables and acceptance criteria. This one artifact is both
+Codex's task prompt **and** Claude's review checklist. Keep it bullets.
+
+Never use the legacy fixed paths (`/tmp/codex-last.md`, `/tmp/codex-handoff.log`,
+`/tmp/handoff-manifest.md`). Those are the regression vector — if Codex fails
+to launch or dies early, leftover files from a prior run look like a success.
 
 #### 3. Preferred dispatch: a Haiku orchestration subagent
 
@@ -131,17 +143,19 @@ cost default-model tokens on a fat context.
 Strict division of labor — **Haiku does plumbing, never judgment**, and
 **never runs `mark`/`report`** (those are the parent's, see steps 1 & 5):
 
-- The **Haiku subagent** gets only the manifest text + a fixed recipe: run the
-  `codex exec` command below, then collect `git status -s`, `git diff --stat`,
-  the contents of `/tmp/codex-last.md`, and (optional, informational only) its
-  own cheap span via `token-report.sh report` against its own transcript. It
-  returns exactly this compact contract:
+- The **Haiku subagent** is told the value of `$RUN_DIR` and gets only the
+  manifest text + a fixed recipe: run the `codex exec` command below, then
+  collect `git status -s`, `git diff --stat`, the contents of
+  `$RUN_DIR/last.md`, and (optional, informational only) its own cheap span via
+  `token-report.sh report` against its own transcript. It returns exactly this
+  compact contract:
 
   ```
+  RUN_DIR:       <the $RUN_DIR it ran in>
   GIT_STATUS:    <git status -s>
   DIFFSTAT:      <git diff --stat>
-  CODEX_MSG:     <contents of /tmp/codex-last.md>
-  RUN_ERROR:     <none | first error/non-zero exit observed>
+  CODEX_MSG:     <contents of $RUN_DIR/last.md>
+  RUN_ERROR:     <none | first error/non-zero exit observed | "timed out">
   SUBAGENT_SPAN: <optional: its own token-report line, Haiku-priced>
   ```
 
@@ -154,17 +168,31 @@ Prefer to **delegate early**, before parent context grows. If no subagent tool
 is available, run the block below inline — correctness unchanged, overhead
 higher.
 
+**Do NOT spawn a separate "waiter" bash.** The dispatch is synchronous: the
+Haiku subagent waits for `codex exec` to return, then hands back the contract.
+If you want the parent to stay responsive while Codex runs, background the
+`codex exec` bash itself (`run_in_background: true`) — the harness already
+notifies on completion. Never launch an extra `while pgrep …; sleep …; done`
+or `tail -f …` task alongside it. Those polls have no reliable termination
+condition, end up orphaned when the codex process exits in a different shell
+session, and pin a background slot until the user manually clicks Stop.
+
 ```bash
-codex exec \
+timeout 30m codex exec \
   --cd "$PWD" \
   --sandbox workspace-write \
   -c approval_policy="never" \
   -c model_reasoning_effort="high" \
-  -o /tmp/codex-last.md \
-  "$(cat /tmp/handoff-manifest.md)" \
-  < /dev/null > /tmp/codex-handoff.log 2>&1
+  -o "$RUN_DIR/last.md" \
+  "$(cat "$RUN_DIR/manifest.md")" \
+  < /dev/null > "$RUN_DIR/codex.log" 2>&1
 ```
 
+- `timeout 30m` is **mandatory**. Even with the stdin/approval guards below, an
+  unforeseen hang (network stall, runaway reasoning, bad sandbox state) would
+  otherwise pin a background slot indefinitely. 30 min comfortably covers real
+  handoffs and turns a hang into a clean non-zero exit that `RUN_ERROR:` picks
+  up. Tune up only if you have a genuinely longer task.
 - `< /dev/null` is **mandatory**. `codex exec` reads stdin and concatenates it
   with the prompt, then blocks on stdin EOF. With no controlling tty
   (background task, CI, nested agent) stdin never closes and Codex hangs
@@ -179,12 +207,12 @@ codex exec \
 - `--sandbox workspace-write` confines writes to the workdir; it cannot escape
   the Claude sandbox dir. Never use `danger-full-access`. (Check flags with
   `codex exec --help`.)
-- `> /tmp/codex-handoff.log 2>&1` (note: **no `| tee`**). The full Codex log is
+- `> "$RUN_DIR/codex.log" 2>&1` (note: **no `| tee`**). The full Codex log is
   verbose; piping it back through Claude's context is pure waste — it was the
   bulk of the measured handoff overhead. Redirect to a file only. The token
   reporter parses that file out-of-context for the `tokens used` total; Claude
   never reads the raw log.
-- `-o /tmp/codex-last.md` writes Codex's **final message only**. For review,
+- `-o "$RUN_DIR/last.md"` writes Codex's **final message only**. For review,
   Claude reads just that file plus `git diff` — never the full run log.
 - Give Codex everything in the prompt (paths, signatures, style, criteria); it
   does not share Claude's conversation context. Prefer a clean-ish git state so
@@ -198,9 +226,14 @@ trust but verify, proportionate to risk.
 
 Review inputs are **only** the subagent's returned contract (`GIT_STATUS`,
 `DIFFSTAT`, `CODEX_MSG`) — or, on the inline fallback, `git status -s` +
-`git diff` + `/tmp/codex-last.md`. Pull a targeted `git diff <file>` only if
+`git diff` + `$RUN_DIR/last.md`. Pull a targeted `git diff <file>` only if
 the contract shows something off. Never `cat` the full run log — that defeats
 the purpose.
+
+Before trusting `CODEX_MSG`, confirm `RUN_DIR` in the contract matches the
+`$RUN_DIR` the parent created and `RUN_ERROR: none`. If `RUN_ERROR` is
+`timed out` or non-zero, the diff is whatever Codex managed before exiting —
+treat it as a failed handoff, not a partial success.
 
 **Default (mechanical / well-specified task) — lightweight semantic check:**
 read the diff against the handoff manifest and confirm only:
@@ -256,10 +289,13 @@ marginal), and it's an out-of-context file read, so it costs only this call.
 
 ```bash
 bash "$CLAUDE_SKILL_DIR/token-report.sh" report \
-  --codex-log /tmp/codex-handoff.log \
+  --codex-log "$RUN_DIR/codex.log" \
   --outcome "<accepted | N-fixups | reverted>" \
   # optional, if the subagent returned its own cheap span:
   # --subagent-span "<SUBAGENT_SPAN from the contract>"
+
+# Clean up the per-run dir immediately after report — no stale artifacts.
+rm -rf "$RUN_DIR"
 ```
 
 (If `$CLAUDE_SKILL_DIR` is unset, run `token-report.sh` next to this file.)

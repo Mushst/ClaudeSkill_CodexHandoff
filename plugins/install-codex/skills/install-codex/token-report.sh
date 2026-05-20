@@ -108,7 +108,8 @@ case "$CMD" in
       echo "token-report: no session transcript found; cannot mark" >&2; exit 1
     fi
     LINES=$(wc -l < "$S" | tr -d ' ')
-    printf 'session=%s\nlines=%s\n' "$S" "$LINES" > "$STATE"
+    STAMP=$(date +%s)
+    printf 'session=%s\nlines=%s\nstamped=%s\n' "$S" "$LINES" "$STAMP" > "$STATE"
     echo "token-report: marked $S @ ${LINES} lines"
     ;;
 
@@ -133,6 +134,17 @@ case "$CMD" in
       exit 0
     fi
     S=$(sed -n 's/^session=//p' "$STATE"); OFF=$(sed -n 's/^lines=//p' "$STATE")
+    # Refuse a stale mark: if the parent's current newest transcript no longer
+    # matches what `mark` recorded, the watermark belongs to a previous session
+    # and the span would be nonsense. Force a fresh `mark`.
+    if [ -z "$SESSION" ]; then
+      CUR=$(resolve_session)
+      if [ -n "$CUR" ] && [ -n "$S" ] && [ "$CUR" != "$S" ]; then
+        echo "claude (default-model handoff-marginal): (stale mark — recorded session $(basename "$S" 2>/dev/null) differs from current $(basename "$CUR"); re-run 'token-report.sh mark' before delegating)" >&2
+        echo "outcome: (skipped — stale mark)"
+        exit 0
+      fi
+    fi
     [ -n "$SESSION" ] && S="$SESSION"
 
     # The valued metric: default-model marginal tokens caused by delegating.
