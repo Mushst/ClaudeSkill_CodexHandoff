@@ -187,21 +187,48 @@ condition, end up orphaned when the codex process exits in a different shell
 session, and pin a background slot until the user manually clicks Stop.
 
 ```bash
-timeout 30m codex exec \
+# Self-bounding run. Backgrounds codex, then a watchdog TERM/KILLs it at 30m
+# and self-exits the instant codex finishes — so this can never dangle.
+# Pure shell on purpose: macOS ships no `timeout`/`gtimeout`, so relying on
+# coreutils here silently dropped the guard and left handoffs hung forever.
+codex exec \
   --cd "$PWD" \
   --sandbox workspace-write \
   -c approval_policy="never" \
   -c model_reasoning_effort="high" \
   -o "$RUN_DIR/last.md" \
   "$(cat "$RUN_DIR/manifest.md")" \
-  < /dev/null > "$RUN_DIR/codex.log" 2>&1
+  < /dev/null > "$RUN_DIR/codex.log" 2>&1 &
+CODEX_PID=$!
+# Watchdog POLLS in short steps so it self-exits within ~5s of codex finishing.
+# (Do NOT use one long `sleep 1800`: killing that subshell orphans its sleep
+# child, which then lingers for the full timeout — the exact hang we're fixing.)
+( DEADLINE=$((SECONDS + 1800))
+  while kill -0 "$CODEX_PID" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+      echo "[skill] codex exec exceeded 30m — terminating" >> "$RUN_DIR/codex.log"
+      kill -TERM "$CODEX_PID" 2>/dev/null; sleep 10
+      kill -KILL "$CODEX_PID" 2>/dev/null
+      break
+    fi
+    sleep 5
+  done ) &
+WATCHDOG_PID=$!
+wait "$CODEX_PID"; CODEX_RC=$?
+kill "$WATCHDOG_PID" 2>/dev/null              # best-effort; watchdog also self-exits
+[ "$CODEX_RC" -ge 124 ] && echo "RUN_ERROR: timed out"
 ```
 
-- `timeout 30m` is **mandatory**. Even with the stdin/approval guards below, an
-  unforeseen hang (network stall, runaway reasoning, bad sandbox state) would
-  otherwise pin a background slot indefinitely. 30 min comfortably covers real
-  handoffs and turns a hang into a clean non-zero exit that `RUN_ERROR:` picks
-  up. Tune up only if you have a genuinely longer task.
+- This **self-bounding watchdog is mandatory** and replaces `timeout 30m`,
+  which is unsafe here: **macOS ships no `timeout` binary** (verified: neither
+  `timeout` nor `gtimeout` exist on a stock Mac), so the old recipe failed with
+  `command not found` or got silently stripped — removing the only guard and
+  leaving the slot pinned indefinitely. The watchdog has no external dependency:
+  it sleeps 30 min, then TERM/KILLs codex if still alive, and exits immediately
+  the moment codex finishes (the `wait` returns and we `kill` the watchdog). An
+  unforeseen hang (network stall, runaway reasoning, bad sandbox state) thus
+  turns into a clean non-zero exit that `RUN_ERROR:` picks up. Tune the `1800`
+  only if you have a genuinely longer task.
 - `< /dev/null` is **mandatory**. `codex exec` reads stdin and concatenates it
   with the prompt, then blocks on stdin EOF. With no controlling tty
   (background task, CI, nested agent) stdin never closes and Codex hangs
